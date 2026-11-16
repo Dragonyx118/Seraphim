@@ -23,7 +23,7 @@ MAX_TURNS = 5
 
 # Voce (Kokoro): "if_sara" (femminile) oppure "im_nicola" (maschile)
 ENABLE_TTS = True
-TTS_VOICE = "if_nicola"
+TTS_VOICE = "im_nicola"
 TTS_SPEED = 1.0
 TTS_DEVICE = None  # None = automatico; "cpu" per lasciare tutta la GPU al modello LLM
 
