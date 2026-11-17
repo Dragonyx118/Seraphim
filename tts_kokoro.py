@@ -1,24 +1,6 @@
-"""TTS Kokoro a parte, pensato per essere agganciato allo streaming dell'LLM.
 
-Integrazione in app_fast (3 punti):
-
-    from tts_kokoro import KokoroTTS
-    tts = KokoroTTS()              # 1) una volta all'avvio (si carica in background)
-
-    tts.stop()                     # 2) prima di una nuova domanda (zittisce la risposta precedente)
-    ...
-    tts.feed(delta)                # 3) dentro il ciclo dello stream, per ogni pezzetto di testo
-    ...
-    tts.flush()                    #    a fine stream, per leggere l'ultimo pezzo rimasto
-
-Come funziona:
-- feed() accumula i pezzetti in un buffer e appena c'è una frase (o una
-  proposizione) completa la manda a Kokoro, senza aspettare la fine della risposta.
-- Il PRIMO pezzo di ogni risposta viene tagliato prima (anche alla virgola) per
-  iniziare a parlare il prima possibile; i successivi sono frasi più naturali.
-- Un thread sintetizza la frase dopo mentre un altro riproduce quella corrente.
-"""
-
+import socket
+import struct
 import queue
 import re
 import threading
@@ -51,7 +33,9 @@ class KokoroTTS:
         device=None,       # None = automatico, "cpu" per lasciare la GPU all'LLM
         primo_pezzo=8,     # caratteri minimi per il primo pezzo (partenza veloce)
         min_frase=20,      # caratteri minimi per le frasi successive
-        min_pausa=40,      # caratteri minimi per tagliare a virgola/due punti dopo il primo pezzo
+        min_pausa=40,
+        port=5005,
+        host="100.100.61.49"
     ):
         self.lang_code = lang_code
         self.voice = voice
@@ -68,6 +52,10 @@ class KokoroTTS:
         self._text_q = queue.Queue()
         self._audio_q = queue.Queue(maxsize=3)
         self._closed = threading.Event()
+        self.host = host
+        self.port = port
+        self._sock = None
+        self._send_lock = threading.Lock()
 
         threading.Thread(target=self._synth_loop, daemon=True).start()
         threading.Thread(target=self._play_loop, daemon=True).start()
@@ -112,7 +100,7 @@ class KokoroTTS:
                     coda.get_nowait()
             except queue.Empty:
                 pass
-        sd.stop()
+        self._send(b"S")
 
     def close(self):
         self._closed.set()
@@ -143,7 +131,18 @@ class KokoroTTS:
         self.say(pezzo)
 
     # ---------- thread interni ----------
-
+    def _send(self, tipo, payload=b""):
+        with self._send_lock:
+            try:
+                if self._sock is None:
+                    self._sock = socket.create_connection((self.host, self.port), timeout=3)
+                    self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self._sock.sendall(tipo + struct.pack(">I", len(payload)) + payload)
+            except OSError as exc:
+                print(f"[TTS]: errore di rete: {exc}")
+                if self._sock:
+                    self._sock.close()
+                self._sock = None
     def _synth_loop(self):
         try:
             from kokoro import KPipeline

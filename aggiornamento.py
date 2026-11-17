@@ -23,7 +23,7 @@ MAX_TURNS = 5
 
 # Voce (Kokoro): "if_sara" (femminile) oppure "im_nicola" (maschile)
 ENABLE_TTS = True
-TTS_VOICE = "if_sara"
+TTS_VOICE = "if_nicola"
 TTS_SPEED = 1.0
 TTS_DEVICE = None  # None = automatico; "cpu" per lasciare tutta la GPU al modello LLM
 
@@ -156,8 +156,7 @@ def stream_answer(messages, tts=None):
         if not delta:
             continue
 
-        # Una frase è finita se termina con . ! ? e il pezzo successivo inizia con
-        # uno spazio/a capo (così "3.5" o "es." a metà non vengono spezzati)
+        
         if tts and sentence and delta[0].isspace():
             if sentence.rstrip()[-1:] in (".", "!", "?") or "\n" in delta:
                 tts.say(sentence)
