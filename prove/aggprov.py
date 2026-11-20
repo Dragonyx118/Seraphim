@@ -119,10 +119,10 @@ def stream_answer(messages, tts=None):
     payload = {
         "model": "qwen-vl",
         "messages": messages,
-        "max_tokens": 95,
+        "max_tokens": 80,
         "temperature": 0.3,
         "stream": True,
-        # il server riusa la parte di conversazione già elaborata
+        
         "cache_prompt": True,
     }
     t0 = time.time()

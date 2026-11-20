@@ -1,5 +1,6 @@
 import base64
 import json
+import queue
 import threading
 import time
 from functools import lru_cache
@@ -12,20 +13,25 @@ try:
 except ImportError:
     from duckduckgo_search import DDGS
 
+from audio_input import VoiceInput
 from tts_kokoro import KokoroTTS
 
-# 127.0.0.1 invece di localhost: su Windows evita il tentativo iniziale su IPv6
 SERVER_URL = "http://127.0.0.1:8080/v1/chat/completions"
 IMAGE_SIZE = (336, 252)
 JPEG_QUALITY = 70
 REQUEST_TIMEOUT = 60
 MAX_TURNS = 5
 
-# Voce (Kokoro): "if_sara" (femminile) oppure "im_nicola" (maschile)
 ENABLE_TTS = True
-TTS_VOICE = "if_nicola"
+TTS_VOICE = "im_nicola"
 TTS_SPEED = 1.0
-TTS_DEVICE = None  # None = automatico; "cpu" per lasciare tutta la GPU al modello LLM
+
+ENABLE_VOICE_INPUT = True
+VOICE_PORT = 5006  # porta su cui il Raspberry manda l'audio del microfono
+WHISPER_MODEL = "small"
+WHISPER_DEVICE = "cuda"  # "cpu" se la GPU serve tutta all'LLM
+WHISPER_COMPUTE = "int8_float16"  # su cpu viene usato int8 in automatico
+TTS_DEVICE = None  
 
 stop_event = threading.Event()
 frame_lock = threading.Lock()
@@ -189,6 +195,17 @@ def encode_frame(frame):
     return base64.b64encode(buffer).decode("ascii")
 
 
+def keyboard_loop(prompt_q):
+    while not stop_event.is_set():
+        try:
+            prompt = input("\n[Tu]: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            prompt_q.put(("/exit", False))
+            return
+        if prompt:
+            prompt_q.put((prompt, False))
+
+
 def main():
     global current_frame
     t = threading.Thread(target=webcam_loop, daemon=True)
@@ -208,24 +225,50 @@ def main():
 
     messages_history = [{"role": "system", "content": SYSTEM_PROMPT}]
 
+    # Coda unica: ci finiscono sia la tastiera sia le frasi trascritte da Whisper.
+    # Ogni elemento è (testo, arriva_dalla_voce).
+    prompt_q = queue.Queue()
+    threading.Thread(target=keyboard_loop, args=(prompt_q,), daemon=True).start()
+
+    voice = None
+    if ENABLE_VOICE_INPUT:
+
+        def on_voice_start():
+            # Pulsante premuto: se l'IA sta parlando, la zittisco subito
+            if tts:
+                tts.stop()
+            print("\n[Voce]: ti ascolto...")
+
+        def on_voice_text(text):
+            print(f"\n[Tu (voce)]: {text}")
+            prompt_q.put((text, True))
+
+        voice = VoiceInput(
+            on_text=on_voice_text,
+            on_start=on_voice_start,
+            port=VOICE_PORT,
+            model_size=WHISPER_MODEL,
+            device=WHISPER_DEVICE,
+            compute_type=WHISPER_COMPUTE,
+        )
+
     try:
         while not stop_event.is_set():
             try:
-                prompt = input("\n[Tu]: ").strip()
-            except (KeyboardInterrupt, EOFError):
+                prompt, from_voice = prompt_q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            # I comandi valgono solo da tastiera: se Whisper sente "q" non deve chiudere tutto
+            if not from_voice and prompt.lower() in ("/exit", "q"):
                 print("\nUscita in corso...")
                 break
-            if not prompt:
-                continue
-            if prompt.lower() in ("/exit", "q"):
-                break
-            if prompt.lower() == "/clear":
+            if not from_voice and prompt.lower() == "/clear":
                 messages_history = [{"role": "system", "content": SYSTEM_PROMPT}]
                 if tts:
                     tts.stop()
                 print("Storico pulito.")
                 continue
-            if prompt.lower() == "/mute":
+            if not from_voice and prompt.lower() == "/mute":
                 if tts:
                     tts.enabled = not tts.enabled
                     if not tts.enabled:
@@ -292,6 +335,8 @@ def main():
 
     finally:
         stop_event.set()
+        if voice:
+            voice.close()
         if tts:
             tts.close()
         t.join(timeout=2)
