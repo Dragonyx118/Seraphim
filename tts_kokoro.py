@@ -6,7 +6,6 @@ import re
 import threading
 
 import numpy as np
-import sounddevice as sd
 
 SAMPLE_RATE = 24000
 
@@ -116,8 +115,7 @@ class KokoroTTS:
         for i, ch in enumerate(buf):
             if ch not in _FINE_FRASE and ch not in _PAUSA:
                 continue
-            # Taglio solo se il carattere dopo è uno spazio (così "3.5" o "3,5" non si spezzano);
-            # l'a capo invece taglia sempre.
+            
             dopo_ok = ch == "\n" or (i + 1 < len(buf) and buf[i + 1].isspace())
             if not dopo_ok:
                 continue
@@ -132,17 +130,28 @@ class KokoroTTS:
 
     # ---------- thread interni ----------
     def _send(self, tipo, payload=b""):
+        pacchetto = tipo + struct.pack(">I", len(payload)) + payload
         with self._send_lock:
-            try:
-                if self._sock is None:
-                    self._sock = socket.create_connection((self.host, self.port), timeout=3)
-                    self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                self._sock.sendall(tipo + struct.pack(">I", len(payload)) + payload)
-            except OSError as exc:
-                print(f"[TTS]: errore di rete: {exc}")
-                if self._sock:
-                    self._sock.close()
-                self._sock = None
+            for tentativo in range(2):
+                era_connesso = self._sock is not None
+                try:
+                    if self._sock is None:
+                        self._sock = socket.create_connection((self.host, self.port), timeout=3)
+                        self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                        self._sock.settimeout(10)
+                    self._sock.sendall(pacchetto)
+                    return True
+                except OSError as exc:
+                    if self._sock:
+                        self._sock.close()
+                    self._sock = None
+                    # Socket vecchia (es. il Pi si è riavviato): riprovo una volta con una nuova
+                    if era_connesso and tentativo == 0:
+                        continue
+                    print(f"[TTS]: errore di rete: {exc}")
+                    return False
+        return False
+
     def _synth_loop(self):
         try:
             from kokoro import KPipeline
@@ -183,7 +192,14 @@ class KokoroTTS:
             if gen != self._generation:
                 continue
             try:
-                sd.play(audio, SAMPLE_RATE)
-                sd.wait()
+                if self.host:
+                    # Audio al Raspberry: PCM int16 mono a 24000 Hz, lo riproduce lui
+                    pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+                    self._send(b"A", pcm)
+                else:
+                    import sounddevice as sd  # riproduzione locale se non c'è un host
+
+                    sd.play(audio, SAMPLE_RATE)
+                    sd.wait()
             except Exception as exc:
                 print(f"[TTS]: errore di riproduzione: {exc}")
